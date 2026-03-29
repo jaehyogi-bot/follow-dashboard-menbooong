@@ -1,9 +1,6 @@
 services:
-  - type: web
+  - type: static_site
     name: follow-dashboard
-    runtime: docker
-    plan: free
+    buildCommand: npm ci && python3 -m pip install -r requirements.txt && npm run build
+    publishPath: out
     autoDeploy: true
-    envVars:
-      - key: PORT
-        value: "10000"

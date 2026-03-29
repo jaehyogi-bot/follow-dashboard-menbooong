@@ -146,3 +146,11 @@ export type FollowDashboardPayload = {
   rankings: FollowRankingRow[];
   generatedAt: string;
 };
+
+export type StaticSnapshotIndex = {
+  latestDate: string;
+  availableDates: Array<{
+    date: string;
+    path: string;
+  }>;
+};

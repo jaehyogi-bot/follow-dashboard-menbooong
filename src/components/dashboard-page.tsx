@@ -1,7 +1,7 @@
 "use client";
 
 import { useDeferredValue, useEffect, useMemo, useState } from "react";
-import type { FollowDashboardPayload, FollowRankingRow } from "@/types/dashboard";
+import type { FollowDashboardPayload, FollowRankingRow, StaticSnapshotIndex } from "@/types/dashboard";
 import styles from "./dashboard-page.module.css";
 
 type SortKey =
@@ -80,19 +80,6 @@ function sortRows(rows: DisplayRow[], sortKey: SortKey, desc: boolean) {
   return next;
 }
 
-function normalizeDate(value: string) {
-  return value.replaceAll("-", "");
-}
-
-function buildQuery(date?: string) {
-  const params = new URLSearchParams();
-  if (date) {
-    params.set("date", date);
-  }
-  const query = params.toString();
-  return `/api/dashboard${query ? `?${query}` : ""}`;
-}
-
 function getDeltaClassName(value: number | null) {
   if (value === null || value === 0) {
     return styles.deltaNeutral;
@@ -100,7 +87,16 @@ function getDeltaClassName(value: number | null) {
   return value > 0 ? styles.deltaPositive : styles.deltaNegative;
 }
 
+async function fetchSnapshot(path: string) {
+  const response = await fetch(path, { cache: "force-cache" });
+  if (!response.ok) {
+    throw new Error(`failed to fetch snapshot: ${path}`);
+  }
+  return (await response.json()) as FollowDashboardPayload;
+}
+
 export function DashboardPage() {
+  const [indexData, setIndexData] = useState<StaticSnapshotIndex | null>(null);
   const [data, setData] = useState<FollowDashboardPayload | null>(null);
   const [compareData, setCompareData] = useState<FollowDashboardPayload | null>(null);
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
@@ -114,31 +110,63 @@ export function DashboardPage() {
   useEffect(() => {
     let mounted = true;
 
-    async function load() {
+    async function loadIndex() {
+      try {
+        const response = await fetch("/data/follow-dashboard/index.json", { cache: "force-cache" });
+        if (!response.ok) {
+          throw new Error("failed to fetch index");
+        }
+        const payload = (await response.json()) as StaticSnapshotIndex;
+        if (!mounted) {
+          return;
+        }
+        setIndexData(payload);
+        setSelectedDate(payload.latestDate);
+        setStatus("ready");
+      } catch {
+        if (!mounted) {
+          return;
+        }
+        setStatus("error");
+      }
+    }
+
+    void loadIndex();
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!indexData || !selectedDate) {
+      return;
+    }
+
+    const activeIndex = indexData;
+    let mounted = true;
+
+    async function loadSnapshots() {
       try {
         setStatus("loading");
+        const currentEntry = activeIndex.availableDates.find((item) => item.date === selectedDate);
+        const compareEntry = compareDate
+          ? activeIndex.availableDates.find((item) => item.date === compareDate)
+          : undefined;
 
-        const requests = [
-          fetch(buildQuery(selectedDate), { cache: "no-store" }),
-          compareDate ? fetch(buildQuery(compareDate), { cache: "no-store" }) : Promise.resolve(null),
-        ] as const;
-
-        const [mainResponse, compareResponse] = await Promise.all(requests);
-        if (!mainResponse.ok) {
-          throw new Error("dashboard fetch failed");
+        if (!currentEntry) {
+          throw new Error("selected date not found");
         }
 
-        const mainPayload = (await mainResponse.json()) as FollowDashboardPayload;
-        const comparePayload =
-          compareResponse && compareResponse.ok
-            ? ((await compareResponse.json()) as FollowDashboardPayload)
-            : null;
+        const [currentPayload, comparePayload] = await Promise.all([
+          fetchSnapshot(currentEntry.path),
+          compareEntry ? fetchSnapshot(compareEntry.path) : Promise.resolve(null),
+        ]);
 
         if (!mounted) {
           return;
         }
 
-        setData(mainPayload);
+        setData(currentPayload);
         setCompareData(comparePayload);
         setStatus("ready");
       } catch {
@@ -149,12 +177,15 @@ export function DashboardPage() {
       }
     }
 
-    void load();
+    void loadSnapshots();
 
     return () => {
       mounted = false;
     };
-  }, [selectedDate, compareDate]);
+  }, [compareDate, indexData, selectedDate]);
+
+  const dateOptions = indexData?.availableDates ?? [];
+  const compareEnabled = Boolean(compareData && compareDate);
 
   const displayedRows = useMemo(() => {
     if (!data) {
@@ -189,7 +220,6 @@ export function DashboardPage() {
   }, [compareData, data, deferredSearch, sortDesc, sortKey]);
 
   const topRows = displayedRows.slice(0, 12);
-  const compareEnabled = Boolean(compareData && compareDate);
 
   const handleSort = (nextKey: SortKey) => {
     if (sortKey === nextKey) {
@@ -205,38 +235,38 @@ export function DashboardPage() {
     window.open(row.naverFinanceUrl, "_blank", "noopener,noreferrer");
   };
 
-  const shiftDate = (value: string, setter: (next: string) => void, days: number, fallback?: string) => {
-    const base = value || fallback;
-    if (!base) {
+  const moveDate = (current: string, setter: (value: string) => void, direction: -1 | 1) => {
+    const dates = dateOptions.map((item) => item.date);
+    const currentIndex = dates.indexOf(current);
+    if (currentIndex === -1) {
       return;
     }
-    const next = new Date(`${base}T00:00:00`);
-    next.setDate(next.getDate() + days);
-    const normalized = `${next.getFullYear()}-${String(next.getMonth() + 1).padStart(2, "0")}-${String(
-      next.getDate(),
-    ).padStart(2, "0")}`;
-    setter(normalized);
+    const nextIndex = currentIndex + direction;
+    if (nextIndex < 0 || nextIndex >= dates.length) {
+      return;
+    }
+    setter(dates[nextIndex]);
   };
 
-  if (status === "loading" || !data) {
+  if (status === "loading" && !data) {
     return (
       <main className={styles.shell}>
         <section className={styles.hero}>
           <p className={styles.eyebrow}>PRIVATE EQUITY FLOW MONITOR</p>
           <h1>대시보드를 불러오는 중</h1>
-          <p className={styles.subcopy}>KRX 수급 계산 결과를 받아오고 있습니다.</p>
+          <p className={styles.subcopy}>배포 시점에 생성된 정적 데이터를 읽고 있습니다.</p>
         </section>
       </main>
     );
   }
 
-  if (status === "error") {
+  if (status === "error" || !data || !indexData) {
     return (
       <main className={styles.shell}>
         <section className={styles.hero}>
           <p className={styles.eyebrow}>PRIVATE EQUITY FLOW MONITOR</p>
           <h1>데이터를 불러오지 못했습니다</h1>
-          <p className={styles.subcopy}>잠시 후 다시 열어보거나 서버 로그를 확인해 주세요.</p>
+          <p className={styles.subcopy}>정적 데이터 생성이나 배포 상태를 확인해 주세요.</p>
         </section>
       </main>
     );
@@ -248,7 +278,9 @@ export function DashboardPage() {
         <div className={styles.heroMain}>
           <p className={styles.eyebrow}>PRIVATE EQUITY FLOW MONITOR</p>
           <h1>{data.overview.title}</h1>
-          <p className={styles.subcopy}>{data.overview.subtitle}</p>
+          <p className={styles.subcopy}>
+            {data.overview.subtitle} 최근 {dateOptions.length}개 거래일 스냅샷을 미리 생성해 빠르게 보여줍니다.
+          </p>
         </div>
 
         <div className={styles.heroMeta}>
@@ -295,7 +327,7 @@ export function DashboardPage() {
           <div>
             <p className={styles.panelTitle}>사모·투신 추종 테이블</p>
             <p className={styles.panelDescription}>
-              기준일과 비교일을 나란히 놓고 볼 수 있게 만들었습니다. 종목을 누르면 네이버증권 종목 페이지를 새 탭으로 엽니다.
+              기준일과 비교일을 미리 생성된 스냅샷에서 골라 빠르게 비교할 수 있습니다. 종목을 누르면 네이버증권 종목 페이지를 새 탭으로 엽니다.
             </p>
           </div>
 
@@ -310,27 +342,22 @@ export function DashboardPage() {
               <div className={styles.dateGroup}>
                 <label className={styles.dateLabel}>기준일</label>
                 <div className={styles.dateControls}>
-                  <button
-                    type="button"
-                    onClick={() => shiftDate(selectedDate, setSelectedDate, -1, data.overview.asOfDate)}
-                  >
-                    전일
+                  <button type="button" onClick={() => moveDate(selectedDate, setSelectedDate, 1)}>
+                    이전
                   </button>
-                  <input
-                    type="date"
+                  <select
                     className={styles.dateInput}
-                    value={selectedDate || data.overview.asOfDate}
+                    value={selectedDate}
                     onChange={(event) => setSelectedDate(event.target.value)}
-                    max={new Date().toISOString().slice(0, 10)}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => shiftDate(selectedDate, setSelectedDate, 1, data.overview.asOfDate)}
                   >
-                    다음일
-                  </button>
-                  <button type="button" onClick={() => setSelectedDate("")}>
-                    최신
+                    {dateOptions.map((item) => (
+                      <option key={item.date} value={item.date}>
+                        {item.date}
+                      </option>
+                    ))}
+                  </select>
+                  <button type="button" onClick={() => moveDate(selectedDate, setSelectedDate, -1)}>
+                    최신쪽
                   </button>
                 </div>
               </div>
@@ -338,31 +365,25 @@ export function DashboardPage() {
               <div className={styles.dateGroup}>
                 <label className={styles.dateLabel}>비교일</label>
                 <div className={styles.dateControls}>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      shiftDate(compareDate, setCompareDate, -1, compareData?.overview.asOfDate ?? data.overview.asOfDate)
-                    }
-                  >
-                    전일
+                  <button type="button" onClick={() => compareDate && moveDate(compareDate, setCompareDate, 1)}>
+                    이전
                   </button>
-                  <input
-                    type="date"
+                  <select
                     className={styles.dateInput}
                     value={compareDate}
                     onChange={(event) => setCompareDate(event.target.value)}
-                    max={new Date().toISOString().slice(0, 10)}
-                  />
-                  <button
-                    type="button"
-                    onClick={() =>
-                      shiftDate(compareDate, setCompareDate, 1, compareData?.overview.asOfDate ?? data.overview.asOfDate)
-                    }
                   >
-                    다음일
-                  </button>
-                  <button type="button" onClick={() => setCompareDate("")}>
-                    해제
+                    <option value="">비교 안 함</option>
+                    {dateOptions
+                      .filter((item) => item.date !== selectedDate)
+                      .map((item) => (
+                        <option key={item.date} value={item.date}>
+                          {item.date}
+                        </option>
+                      ))}
+                  </select>
+                  <button type="button" onClick={() => compareDate && moveDate(compareDate, setCompareDate, -1)}>
+                    최신쪽
                   </button>
                 </div>
               </div>
@@ -383,7 +404,7 @@ export function DashboardPage() {
             <span>
               기준일 {data.overview.asOfDate} vs 비교일 {compareData?.overview.asOfDate}
             </span>
-            <span>표의 비교 메인/비교 점수는 두 날짜 사이 변화폭입니다.</span>
+            <span>비교 메인과 비교 점수는 두 스냅샷 사이 변화폭입니다.</span>
           </div>
         ) : null}
 

@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "prebuild": "python -X utf8 scripts/generate_static_dashboards.py",
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
